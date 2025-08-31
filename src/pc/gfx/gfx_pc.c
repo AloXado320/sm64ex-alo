@@ -850,6 +850,7 @@ static void gfx_sp_matrix(uint8_t parameters, const int32_t *addr) {
             memcpy(rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 2], sizeof(matrix));
         }
         if (parameters & G_MTX_LOAD) {
+            if (rsp.modelview_matrix_stack_size == 0) ++rsp.modelview_matrix_stack_size;
             memcpy(rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], matrix, sizeof(matrix));
         } else {
             gfx_matrix_mul(rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], matrix, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1]);
@@ -868,6 +869,7 @@ static void gfx_sp_pop_matrix(uint32_t count) {
             }
         }
     }
+    rsp.lights_changed = 1;
 }
 
 static float gfx_adjust_x_for_aspect_ratio(float x) {
@@ -895,8 +897,8 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
                 for (int i = 0; i < rsp.current_num_lights - 1; i++) {
                     calculate_normal_dir(&rsp.current_lights[i], rsp.current_lights_coeffs[i]);
                 }
-                static const Light_t lookat_x = {{0, 0, 0}, 0, {0, 0, 0}, 0, {127, 0, 0}, 0};
-                static const Light_t lookat_y = {{0, 0, 0}, 0, {0, 0, 0}, 0, {0, 127, 0}, 0};
+                static const Light_t lookat_x = {{0, 0, 0}, 0, {0, 0, 0}, 0, {0, 127, 0}, 0};
+                static const Light_t lookat_y = {{0, 0, 0}, 0, {0, 0, 0}, 0, {127, 0, 0}, 0};
                 calculate_normal_dir(&lookat_x, rsp.current_lookat_coeffs[0]);
                 calculate_normal_dir(&lookat_y, rsp.current_lookat_coeffs[1]);
                 rsp.lights_changed = false;
