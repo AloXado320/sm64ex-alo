@@ -700,23 +700,41 @@ static bool preload_texture(void *user, const char *path) {
     char *dot = strrchr(texname, '.');
     if (dot) *dot = 0;
 
-    // get the format and size from filename
+    // print current file being cached
+    #ifdef _WIN32
+    // use spaces method
+    static int last_len = 0;
+    if (last_len > 0) {
+        fprintf(stdout, "\r%*s\r", last_len, "");
+    }
+    last_len = fprintf(stdout, "precaching: %s", path);
+    #else
+    // use ANSI codes
+    fprintf(stdout, "\033[2K\rprecaching: %s", path);
+    #endif
+    fflush(stdout);
+
+    // Get the format and size from filename
     u8 fmt, siz;
     if (!texname_to_texformat(texname, &fmt, &siz)) {
         fprintf(stderr, "unknown texture format: `%s`, skipping\n", texname);
         return true; // just skip it, might be a stray skybox or something
     }
 
-    char *actualname = texname;
-    // strip off the prefix // TODO: make a fs_ function for this shit
-    if (!strncmp(FS_TEXTUREDIR "/", actualname, 4)) actualname += 4;
+    const char *actualname = texname;
+    const char *prefix = FS_TEXTUREDIR "/"; // strip off the "gfx/" prefix
+    size_t prefix_len = strlen(prefix);
+    if (!strncmp(actualname, prefix, prefix_len)) {
+        actualname += prefix_len;
+    }
     // this will be stored in the hashtable, so make a copy
     actualname = sys_strdup(actualname);
     assert(actualname);
 
     struct TextureHashmapNode *n;
-    if (!gfx_texture_cache_lookup(0, &n, actualname, fmt, siz, 0, 0))
+    if (!gfx_texture_cache_lookup(0, &n, actualname, fmt, siz, 0, 0)) {
         load_texture(path); // new texture, load it
+    }
 
     return true;
 }
@@ -2037,6 +2055,15 @@ void gfx_init(struct GfxWindowManagerAPI *wapi, struct GfxRenderingAPI *rapi, co
 void gfx_precache_textures(void) {
     // preload all textures
     fs_walk(FS_TEXTUREDIR, preload_texture, NULL, true);
+    // print complete cache message once we are done
+    #ifdef _WIN32
+    // clear with spaces and newline
+    fprintf(stdout, "\r%*s\rprecaching complete!\n", 80, "");
+    #else
+    // use ANSI codes
+    fprintf(stdout, "\033[2K\rprecaching complete!\n");
+    #endif
+    fflush(stdout);
 }
 #endif
 
