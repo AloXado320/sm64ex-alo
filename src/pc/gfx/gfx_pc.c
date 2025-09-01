@@ -580,28 +580,51 @@ static void import_texture_ci8(int tile) {
 }
 
 #else // EXTERNAL_DATA
+static int fs_stb_read(void *user, char *data, int size) {
+    fs_file_t *file = (fs_file_t *)user;
+    return (int)fs_read(file, data, size);
+}
+
+static void fs_stb_skip(void *user, int n) {
+    fs_file_t *file = (fs_file_t *)user;
+    fs_seek(file, fs_tell(file) + n);
+}
+
+static int fs_stb_eof(void *user) {
+    fs_file_t *file = (fs_file_t *)user;
+    return fs_eof(file);
+}
 
 static inline void load_texture(const char *fullpath) {
-    int w, h;
-    uint64_t imgsize = 0;
+    int w, h, c;
+    fs_file_t *file = fs_open(fullpath);
 
-    u8 *imgdata = fs_load_file(fullpath, &imgsize);
-    if (imgdata) {
-        // TODO: implement stbi_callbacks or something instead of loading the whole texture
-        u8 *data = stbi_load_from_memory(imgdata, imgsize, &w, &h, NULL, 4);
-        free(imgdata);
-        if (data) {
-            gfx_rapi->upload_texture(data, w, h);
-            stbi_image_free(data); // don't need this anymore
-            return;
-        }
+    if (!file) {
+        fprintf(stderr, "could not open texture: `%s`\n", fullpath);
+        // replace with missing texture
+        gfx_rapi->upload_texture(missing_texture, MISSING_W, MISSING_H);
+        return;
+    }
+
+    stbi_io_callbacks callbacks = {
+        .read = fs_stb_read,
+        .skip = fs_stb_skip,
+        .eof  = fs_stb_eof,
+    };
+
+    u8 *data = stbi_load_from_callbacks(&callbacks, file, &w, &h, &c, 4);
+    fs_close(file);
+
+    if (data) {
+        gfx_rapi->upload_texture(data, w, h);
+        stbi_image_free(data); // don't need this anymore
+        return;
     }
 
     fprintf(stderr, "could not load texture: `%s`\n", fullpath);
     // replace with missing texture
     gfx_rapi->upload_texture(missing_texture, MISSING_W, MISSING_H);
 }
-
 
 // this is taken straight from n64graphics
 static bool texname_to_texformat(const char *name, u8 *fmt, u8 *siz) {
