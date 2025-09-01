@@ -210,6 +210,37 @@ static inline size_t string_hash(const uint8_t *str) {
         h = 31 * h + *p;
     return h;
 }
+
+// Check for png header
+static inline int is_png_file(const char *filename) {
+    fs_file_t *file = fs_open(filename);
+    if (!file) return 0;
+    
+    unsigned char header[8];
+    size_t bytes_read = fs_read(file, header, 8);
+    fs_close(file);
+    
+    return (bytes_read == 8 && 
+            header[0] == 0x89 && header[1] == 0x50 && 
+            header[2] == 0x4E && header[3] == 0x47 && 
+            header[4] == 0x0D && header[5] == 0x0A && 
+            header[6] == 0x1A && header[7] == 0x0A);
+}
+
+static inline int is_file_texture(const char *texture_data) {
+    // Quick check: if it contains path separators or extensions, it's likely a file
+    if (strchr(texture_data, '/') || strchr(texture_data, '\\') || 
+        strchr(texture_data, '.') || strlen(texture_data) < SYS_MAX_PATH) {
+        
+        char test_path[SYS_MAX_PATH];
+        snprintf(test_path, sizeof(test_path), FS_TEXTUREDIR "/%s.png", texture_data);
+        
+        if (is_png_file(test_path)) {
+            return 1;
+        }
+    }
+    return 0;
+}
 #endif
 
 #ifdef TARGET_N3DS
@@ -330,14 +361,14 @@ static struct ColorCombiner *gfx_lookup_or_create_color_combiner(uint32_t cc_id)
 }
 
 static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, const uint8_t *orig_addr, uint32_t fmt, uint32_t siz, const uint8_t *palette, uint32_t checksum) {
-
-    #ifdef EXTERNAL_DATA // hash and compare the data (i.e. the texture name) itself
-    size_t hash = string_hash(orig_addr);
-    #define CMPADDR(x, y) (x && !sys_strcasecmp((const char *)x, (const char *)y))
-    #else // hash and compare the address
+#ifdef EXTERNAL_DATA // hash and compare the texture name data if it exists, otherwise use the address
+    int is_ext_img = is_file_texture((const char*)orig_addr);
+    size_t hash = is_ext_img ? string_hash(orig_addr) : (uintptr_t)orig_addr;
+    #define CMPADDR(x, y) (is_ext_img ? (x && !sys_strcasecmp((const char *)x, (const char *)y)) : (x == y))
+#else // hash and compare the address
     size_t hash = (uintptr_t)orig_addr;
     #define CMPADDR(x, y) x == y
-    #endif
+#endif
 
     hash = (hash >> HASH_SHIFT) & HASH_MASK;
 
@@ -375,8 +406,6 @@ static bool gfx_texture_cache_lookup(int tile, struct TextureHashmapNode **n, co
     return false;
     #undef CMPADDR
 }
-
-#ifndef EXTERNAL_DATA
 
 static uint8_t rgba32_buf[32768] __attribute__((aligned(32)));
 
@@ -579,7 +608,7 @@ static void import_texture_ci8(int tile) {
     gfx_rapi->upload_texture(rgba32_buf, width, height);
 }
 
-#else // EXTERNAL_DATA
+#ifdef EXTERNAL_DATA
 static int fs_stb_read(void *user, char *data, int size) {
     fs_file_t *file = (fs_file_t *)user;
     return (int)fs_read(file, data, size);
@@ -763,10 +792,13 @@ static void import_texture(int tile) {
 #ifdef EXTERNAL_DATA
     // the "texture data" is actually a C string with the path to our texture in it
     // load it from an external image in our data path
-    char texname[SYS_MAX_PATH];
-    snprintf(texname, sizeof(texname), FS_TEXTUREDIR "/%s.png", (const char*)rdp.loaded_texture[tile].addr);
-    load_texture(texname);
-#else
+    if (is_file_texture((const char*)rdp.loaded_texture[tile].addr)) {
+        char texname[SYS_MAX_PATH];
+        snprintf(texname, sizeof(texname), FS_TEXTUREDIR "/%s.png", (const char*)rdp.loaded_texture[tile].addr);
+        load_texture(texname);
+        return;
+    }
+#endif
     // the texture data is actual texture data
     if (fmt == G_IM_FMT_RGBA) {
         if (siz == G_IM_SIZ_32b) {
@@ -806,7 +838,6 @@ static void import_texture(int tile) {
     } else {
         sys_fatal("unsupported texture format: %u", fmt);
     }
-#endif
 }
 
 static void gfx_normalize_vector(float v[3]) {
