@@ -42,7 +42,7 @@ def calculate_file_hash(filepath):
     except (IOError, OSError):
         return None
 
-def generate_file_list(build_dir, basedir, defines, skytile_dir):
+def generate_file_list(build_dir, defines, skytile_dir):
     """Generate the list of files to include in the basepack"""
     file_list = []
 
@@ -68,7 +68,7 @@ def generate_file_list(build_dir, basedir, defines, skytile_dir):
             file_list.append((real_path, archive_path))
 
     # Skybox tiles
-    if os.path.exists(skytile_dir):
+    if skytile_dir and os.path.exists(skytile_dir):
         for tile_file in glob.glob(os.path.join(skytile_dir, '*')):
             if os.path.isfile(tile_file):
                 archive_path = f"gfx/{os.path.relpath(tile_file, build_dir)}"
@@ -80,23 +80,21 @@ def generate_file_list(build_dir, basedir, defines, skytile_dir):
     if is_defined(defines, 'PORT_MOP_OBJS'):
         folders_to_search.append('src/extras/mop/actors')
 
-    # Directories to exclude (startswith also excludes crash_screen_pc without the slash)
-    exclude_list = ['textures/crash_screen']
+    # Exact directory paths to exclude
+    exclude_paths = ['textures/crash_screen', 'textures/crash_screen_pc']
 
-    # Exclude CN-specific textures if not CN version
     if not is_defined(defines, 'VERSION_CN'):
-        exclude_list.append('textures/segment2/cn')
+        exclude_paths.append('textures/segment2/cn')
+
+    # Normalize all paths at once
+    exclude_list = [os.path.normpath(path) for path in exclude_paths]
 
     for folder in folders_to_search:
         if os.path.exists(folder):
             for root, dirs, files in os.walk(folder):
-                # Check if current directory should be excluded
-                should_exclude = False
-                for exclude_pattern in exclude_list:
-                    # Check if the current root matches any exclude pattern
-                    if root.startswith(exclude_pattern):
-                        should_exclude = True
-                        break
+                # Check if current directory should be excluded (exact match)
+                normalized_root = os.path.normpath(root)
+                should_exclude = normalized_root in exclude_list
 
                 if should_exclude:
                     # Skip this directory and all its subdirectories
@@ -143,7 +141,7 @@ def save_ndjson_cache(cache_file, cache_data):
 def clean_cache(build_dir):
     """Clean the cache file"""
     cache_file = os.path.join(build_dir, 'basepack_cache.ndjson')
-    
+
     if os.path.exists(cache_file):
         try:
             os.remove(cache_file)
@@ -221,23 +219,23 @@ def print_progress(current, total, start_time, message=""):
     """Simple progress indicator with ASCII-only characters"""
     if total == 0:
         return
-        
+
     elapsed = time.time() - start_time
     percent = (current / total) * 100
     bar_length = 20
     filled_length = int(bar_length * current // total)
-    
+
     bar = '=' * filled_length + '-' * (bar_length - filled_length)
-    
+
     if current > 0:
         time_per_file = elapsed / current
         remaining = time_per_file * (total - current)
         time_info = f"{elapsed:.1f}s elapsed, {remaining:.1f}s remaining"
     else:
         time_info = f"{elapsed:.1f}s elapsed"
-    
+
     progress_text = f"\r{message} |{bar}| {current}/{total} ({percent:.1f}%) {time_info}"
-    
+
     try:
         sys.stdout.write(progress_text)
         sys.stdout.flush()
@@ -247,22 +245,90 @@ def print_progress(current, total, start_time, message=""):
         sys.stdout.write(simple_text)
         sys.stdout.flush()
 
-def create_basepack(build_dir, basedir, defines, skytile_dir, output_zip, num_workers):
+def verify_zip_contents(zip_path, expected_files, changed_files=None):
+    """Verify that the ZIP contains the expected files and check changed files"""
+    if not os.path.exists(zip_path):
+        print(f"ERROR: ZIP file {zip_path} does not exist")
+        return False
+
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zipf:
+            zip_files = set(zipf.namelist())
+
+            # Check if all expected files are present
+            missing_files = expected_files - zip_files
+            if missing_files:
+                print(f"ERROR: {len(missing_files)} files missing from ZIP:")
+                for missing in sorted(missing_files)[:10]:  # Show first 10 missing
+                    print(f"  - {missing}")
+                if len(missing_files) > 10:
+                    print(f"  ... and {len(missing_files) - 10} more")
+                return False
+
+            # Check if any unexpected files are present
+            extra_files = zip_files - expected_files
+            if extra_files:
+                print(f"WARNING: {len(extra_files)} unexpected files in ZIP:")
+                for extra in sorted(extra_files)[:5]:  # Show first 5 extra
+                    print(f"  - {extra}")
+                if len(extra_files) > 5:
+                    print(f"  ... and {len(extra_files) - 5} more")
+
+            # Verify changed files if provided
+            if changed_files:
+                verified_changes = 0
+                failed_changes = 0
+
+                for real_path, archive_path in changed_files:
+                    if archive_path in zip_files:
+                        # Calculate hash of the file in ZIP
+                        with zipf.open(archive_path) as zipped_file:
+                            zip_content = zipped_file.read()
+                            zip_hash = hashlib.md5(zip_content).hexdigest()
+
+                        # Calculate hash of the original file
+                        file_hash = calculate_file_hash(real_path)
+
+                        if file_hash and zip_hash == file_hash:
+                            verified_changes += 1
+                        else:
+                            failed_changes += 1
+                            print(f"VERIFY FAIL: {archive_path} - hash mismatch")
+                    else:
+                        failed_changes += 1
+                        print(f"VERIFY FAIL: {archive_path} - missing from ZIP")
+
+                if failed_changes > 0:
+                    print(f"File verification: {verified_changes} OK, {failed_changes} FAILED")
+                    return False
+                else:
+                    print(f"File verification: All {verified_changes} changed files verified OK")
+
+            return True
+
+    except (IOError, zipfile.BadZipFile) as e:
+        print(f"ERROR: Failed to verify ZIP file: {e}")
+        return False
+
+def create_basepack(build_dir, defines, skytile_dir, output_zip, num_workers):
     """Generate file list and create basepack ZIP with optimizations"""
     cache_file = os.path.join(build_dir, 'basepack_cache.ndjson')
-    
+
     # Generate complete file list
     print("Scanning for files...")
-    file_list = generate_file_list(build_dir, basedir, defines, skytile_dir)
+    file_list = generate_file_list(build_dir, defines, skytile_dir)
     print(f"Found {len(file_list)} total files")
-    
+
     # Check which files need to be packed
     print("Checking cache for changes...")
     files_to_pack, cleaned_cache = get_files_to_pack(file_list, cache_file)
-    
+
+    # Track changed files for verification
+    changed_files = files_to_pack.copy()
+
     # Get the set of archive paths that should be in the final ZIP
     current_archive_paths = {archive_path for _, archive_path in file_list}
-    
+
     # Check if ZIP needs to be rebuilt to remove unwanted files
     need_cleanup = False
     if os.path.exists(output_zip):
@@ -277,34 +343,37 @@ def create_basepack(build_dir, basedir, defines, skytile_dir, output_zip, num_wo
         except (IOError, zipfile.BadZipFile):
             # ZIP is corrupt or can't be read, need to rebuild
             need_cleanup = True
-    
+
     # We need to rebuild if:
     # 1. There are files to pack (changed/new files), OR
     # 2. There are unwanted files in the ZIP that need removal
     # 3. Cache file doesn't exist but ZIP does (force rebuild to avoid duplicates)
     cache_exists = os.path.exists(cache_file)
     need_rebuild = bool(files_to_pack) or need_cleanup or (os.path.exists(output_zip) and not cache_exists)
-    
+
     if not need_rebuild:
         print("No files need to be updated in basepack")
         # Still save the cleaned cache (in case files were removed from filesystem)
         save_ndjson_cache(cache_file, cleaned_cache)
         return True
-    
+
     if need_cleanup and not files_to_pack:
         print("Cleaning up unwanted files from ZIP...")
     elif not cache_exists and os.path.exists(output_zip):
         print("Cache missing, rebuilding ZIP to avoid duplicates...")
-    
-    print(f"Processing {len(files_to_pack)} changed files with {num_workers} workers...")
-    
+
+    if files_to_pack:
+        print(f"Processing {len(files_to_pack)} changed files:")
+        for real_path, archive_path in files_to_pack:
+            print(f"  - {archive_path}")
+
     # Use ThreadPoolExecutor for parallel file reading
     start_time = time.time()
     successful_reads = 0
     failed_reads = 0
     failed_files = []
     file_contents = []
-    
+
     if files_to_pack:
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             # Submit all file reading tasks
@@ -312,11 +381,11 @@ def create_basepack(build_dir, basedir, defines, skytile_dir, output_zip, num_wo
                 executor.submit(prepare_file_for_zip, real_path, archive_path): (real_path, archive_path)
                 for real_path, archive_path in files_to_pack
             }
-            
+
             # Process results with progress indicator
             completed = 0
             total = len(files_to_pack)
-            
+
             for future in as_completed(future_to_file):
                 real_path, archive_path = future_to_file[future]
                 try:
@@ -330,75 +399,87 @@ def create_basepack(build_dir, basedir, defines, skytile_dir, output_zip, num_wo
                 except Exception as e:
                     failed_reads += 1
                     failed_files.append((real_path, str(e)))
-                
+
                 completed += 1
                 print_progress(completed, total, start_time, "Reading files")
-    
+
     # Print newline to clear the progress bar
     print()
     if files_to_pack:
         print(f"File reading complete: {successful_reads} successful, {failed_reads} failed")
-    
+
     if failed_reads > 0:
         print("\nFailed to read files:")
         for file_path, error in failed_files:
-            print(f"  {file_path}: {error}")
-    
+            print(f"  - {file_path}: {error}")
+
     # Now create the ZIP file
     if need_rebuild:
         print(f"Creating ZIP archive...")
         try:
             # Create a temporary file first
             temp_zip = output_zip + '.tmp'
-            
+
+            # Create a mapping of archive paths to content for changed files
+            changed_files_map = {archive_path: content for archive_path, content in file_contents}
+
             with zipfile.ZipFile(temp_zip, 'w', zipfile.ZIP_DEFLATED, allowZip64=False) as zipf:
-                # Track which files we've already added to avoid duplicates
                 added_files = set()
-                
-                # Copy existing files that should remain in the ZIP
+
+                # First, add all files from the old ZIP that should remain (excluding changed ones)
                 if os.path.exists(output_zip):
                     try:
                         with zipfile.ZipFile(output_zip, 'r') as old_zip:
                             for old_info in old_zip.infolist():
-                                if old_info.filename in current_archive_paths and old_info.filename not in added_files:
-                                    # This file should remain in the ZIP and hasn't been added yet
+                                if (old_info.filename in current_archive_paths and
+                                    old_info.filename not in changed_files_map and
+                                    old_info.filename not in added_files):
+
+                                    # This file should remain and hasn't been changed
                                     with old_zip.open(old_info) as old_file:
                                         content = old_file.read()
                                     zipf.writestr(old_info.filename, content)
                                     added_files.add(old_info.filename)
                                     if len(added_files) % 100 == 0:
-                                        print_progress(len(added_files), len(current_archive_paths), start_time, "Copying existing files")
+                                        print_progress(len(added_files), len(current_archive_paths), start_time, "Copying unchanged files")
                     except (IOError, zipfile.BadZipFile):
                         # Old ZIP is corrupt, start fresh
                         pass
-                
-                # Add all new/changed files (overwriting any existing ones)
+
+                # Now add all changed files (this will overwrite any existing ones)
                 for i, (archive_path, content) in enumerate(file_contents):
-                    if archive_path not in added_files:  # Only add if not already copied
-                        zipf.writestr(archive_path, content)
-                        added_files.add(archive_path)
-                    
+                    zipf.writestr(archive_path, content)
+                    added_files.add(archive_path)
+
                     if len(added_files) % 100 == 0 or i + 1 == len(file_contents):
-                        print_progress(len(added_files), len(current_archive_paths), start_time, "Adding new files")
-            
+                        print_progress(len(added_files), len(current_archive_paths), start_time, "Adding changed files")
+
             # Replace the old ZIP with the new one
             if os.path.exists(output_zip):
                 os.remove(output_zip)
             os.rename(temp_zip, output_zip)
-            
+
             # Print newline to clear the progress bar
             print()
-            
-            # Update cache AFTER successful ZIP creation
+
+            # Verify the ZIP contents
+            print("Verifying ZIP contents...")
+            verification_success = verify_zip_contents(output_zip, current_archive_paths, changed_files if files_to_pack else None)
+
+            if not verification_success:
+                print("ERROR: ZIP verification failed!")
+                return False
+
+            # Update cache AFTER successful ZIP creation and verification
             print("Updating cache...")
             # The cache is already updated with new/changed files in get_files_to_pack
             # We just need to save it
             save_ndjson_cache(cache_file, cleaned_cache)
-            
+
             final_count = len(added_files)
-            print(f"Successfully created ZIP with {final_count} files")
+            print(f"Successfully created and verified ZIP with {final_count} files")
             return True
-            
+
         except (IOError, OSError, zipfile.BadZipFile) as e:
             print(f"\nError creating ZIP file: {e}")
             # Clean up temporary file if it exists
@@ -414,11 +495,10 @@ def create_basepack(build_dir, basedir, defines, skytile_dir, output_zip, num_wo
 def main():
     parser = argparse.ArgumentParser(description='EXTERNAL_DATA zip packer for sm64ex')
     parser.add_argument('--build-dir', required=True, help='Build directory')
-    parser.add_argument('--base-dir', help='Base directory name')
     parser.add_argument('--skytile-dir', help='Skybox tiles directory')
     parser.add_argument('--output', help='Output ZIP file')
     parser.add_argument('--workers', type=int, help='Number of worker threads (default: CPU count - 1)')
-    parser.add_argument('--clean', action='store_true', help='Clean cache file and ZIP file and exit')
+    parser.add_argument('--clean', action='store_true', help='Clean cache file and exit')
     parser.add_argument('-D', action='append', default=[], help='Define C flags')
 
     args = parser.parse_args()
@@ -429,8 +509,8 @@ def main():
         sys.exit(0 if success else 1)
 
     # Validate required arguments for non-clean operations
-    if not all([args.base_dir, args.skytile_dir, args.output]):
-        parser.error("the following arguments are required for packing: --base-dir, --skytile-dir, --output")
+    if not args.output:
+        parser.error("the following arguments are required for packing: --output")
 
     # Parse defines (C-style: both KEY and KEY=VALUE)
     defines = parse_defines(args.D)
@@ -446,7 +526,6 @@ def main():
 
     success = create_basepack(
         args.build_dir,
-        args.base_dir,
         defines,
         args.skytile_dir,
         args.output,

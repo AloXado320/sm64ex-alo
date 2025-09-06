@@ -1258,7 +1258,7 @@ res: $(BASEPACK_PATH)
 # Combined generation and packing
 $(BASEPACK_PATH): $(EXE_DEPEND)
 	@$(PRINT) "$(GREEN)Packing external data list: $(BLUE)$@ $(NO_COL)\n"
-	$(V)$(PYTHON) pack_extdata.py --build-dir "$(BUILD_DIR)" --base-dir "$(BASEDIR)" --skytile-dir "$(SKYTILE_DIR)" --output "$@" $(C_DEFINES) > /dev/null
+	$(V)$(PYTHON) pack_extdata.py --build-dir "$(BUILD_DIR)" --skytile-dir "$(SKYTILE_DIR)" --output "$@" $(C_DEFINES) > /dev/null
 endif
 
 clean:
@@ -1428,6 +1428,15 @@ $(BUILD_DIR)/%: %.png
 $(BUILD_DIR)/%.inc.c: $(BUILD_DIR)/% %.png
 	$(call print,Converting:,$<,$@)
 	$(V)hexdump -v -e '1/1 "0x%X,"' $< > $@
+    
+# Store crash screen textures so they render even without any texture data
+$(BUILD_DIR)/$(TEXTURE_DIR)/crash_screen_pc/%.inc.c: $(TEXTURE_DIR)/crash_screen_pc/%.png
+	$(call print,Converting crash textures:,$<,$@)
+	$(V)$(N64GRAPHICS) -s $(TEXTURE_ENCODING) -i $@ -g $< -f $(lastword $(subst ., ,$(basename $<)))
+
+$(BUILD_DIR)/$(TEXTURE_DIR)/crash_screen_pc/%: $(TEXTURE_DIR)/crash_screen_pc/%.png
+	$(call print,Converting crash textures:,$<,$@)
+	$(V)$(N64GRAPHICS) -s raw -i $@ -g $< -f $(lastword $(subst ., ,$@))
 else
 $(BUILD_DIR)/%: %.png
 	$(call print,Converting:,$<,$@)
