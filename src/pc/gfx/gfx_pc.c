@@ -655,7 +655,7 @@ static inline void load_texture(const char *fullpath) {
     gfx_rapi->upload_texture(missing_texture, MISSING_W, MISSING_H);
 }
 
-// this is taken straight from n64graphics
+#ifndef TARGET_PORT_CONSOLE
 static bool texname_to_texformat(const char *name, u8 *fmt, u8 *siz) {
     static const struct {
         const char *name;
@@ -738,6 +738,7 @@ static bool preload_texture(void *user, const char *path) {
 
     return true;
 }
+#endif // TARGET_PORT_CONSOLE
 
 #endif // EXTERNAL_DATA
 
@@ -2051,7 +2052,7 @@ void gfx_init(struct GfxWindowManagerAPI *wapi, struct GfxRenderingAPI *rapi, co
         gfx_lookup_or_create_shader_program(precomp_shaders[i]);
 }
 
-#ifdef EXTERNAL_DATA
+#if defined(EXTERNAL_DATA) && !defined(TARGET_PORT_CONSOLE)
 void gfx_precache_textures(void) {
     // preload all textures
     fs_walk(FS_TEXTUREDIR, preload_texture, NULL, true);
